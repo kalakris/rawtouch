@@ -1,0 +1,257 @@
+// MIT License
+// Copyright (c) 2026 RawTouch contributors
+//
+// Standalone read-only monitor for the zmk-raw-touch vendor HID stream.
+// Matches the vendor collection (usage page 0xFF00, usage 0x01), filters
+// input report 0x04, and prints one CSV line per protocol-4 frame:
+//
+//     host_ns,dev,pad,contact,x,y,z,flags,seq,ts_ticks
+//
+// host_ns is CLOCK_UPTIME_RAW at callback time (arrival time); ts_ticks is
+// the device-side 100 µs sample clock (wraps at 6.5536 s). Device add /
+// removal / transport notes go to stderr so stdout stays clean CSV. This is
+// the format of bench/captures/*.csv, and what bench/lift-strength.py and
+// bench/safari-bounce/record.py read.
+//
+// Passive observer by default: opens the device non-seizing, so a running
+// stream consumer keeps working while this runs.
+//
+// The firmware emits frames only while a host lease is held, so a passive
+// monitor sees frames only while some host holds one. Two modes:
+//
+// - RawTouch (or another host) running: just run passively — its lease
+//   keeps frames flowing, HID input reports fan out to every client, and
+//   you observe exactly what the host sees without perturbing anything.
+//   This is the preferred debug mode. Do NOT also pass --lease: it adds
+//   nothing (frames already flow) and muddies lease-renew/expiry timing.
+// - No host running: the stream is silent by design (the frames are never
+//   transmitted), so pass --lease: the monitor writes the lease feature
+//   report itself (4-byte lease body, renewed periodically, released on
+//   Ctrl-C).
+//
+// Observer effect of --lease: holding the lease puts the keyboard in
+// RawTouch mode, so the keyboard's own wheel scrolling (Standard mode)
+// stops and scroll gestures move nothing on screen until release. A
+// leasing monitor does not double-scroll: it synthesizes nothing.
+//
+// Build & run:
+//     swiftc -O scripts/raw-touch-monitor.swift -o "$TMPDIR/raw-touch-monitor"
+//     "$TMPDIR/raw-touch-monitor" > capture.csv            (Ctrl-C to stop)
+//     "$TMPDIR/raw-touch-monitor" --lease > capture.csv    (standalone capture)
+// or uncompiled: swift scripts/raw-touch-monitor.swift > capture.csv
+
+import Foundation
+import IOKit.hid
+
+let usagePage = 0xFF00
+let usage = 0x01
+let frameReportID: UInt32 = 0x04
+let framePayloadLength = 11
+
+// Feature-report wire format (protocol 4; the module's docs/protocol.md is
+// normative): a 16-byte header — protocol version, pads-present,
+// capabilities, module version, the four "RAWT" magic bytes, then the
+// 8-byte hwinfo device id — plus one 8-byte geometry slot per pad, so a
+// valid body is 16 + 8N bytes (one more over USB, where macOS prefixes the
+// report ID).
+let featureProtocolVersion: UInt8 = 4
+let featureHeaderLength = 16
+let featurePadSlotLength = 8
+let featureMagicOffset = 4
+let featureMagic: [UInt8] = Array("RAWT".utf8)
+let featureDeviceIDOffset = 8
+let featureDeviceIDLength = 8
+
+/// The feature body out of whatever macOS handed back, or nil if the buffer
+/// is not a protocol-4 raw-touch body at all.
+///
+/// Over USB the GET comes back report-ID-prefixed, over BLE bare. A
+/// "strip it if the first byte is the report ID" rule would not work: a
+/// bare body starts with the protocol version, which is 4, the same value
+/// as the report ID, so it would eat a byte off every Bluetooth read.
+/// Validate instead: try the buffer as it came, then the ID-stripped
+/// reading. Magic, version and the exact 16 + 8N length all have to agree.
+func featureBody(_ buffer: [UInt8]) -> [UInt8]? {
+    func valid(_ body: [UInt8]) -> Bool {
+        body.count >= featureHeaderLength + featurePadSlotLength
+            && (body.count - featureHeaderLength) % featurePadSlotLength == 0
+            && body[0] == featureProtocolVersion
+            && Array(body[featureMagicOffset ..< featureMagicOffset + featureMagic.count])
+                == featureMagic
+    }
+    if valid(buffer) { return buffer }
+    if buffer.first == UInt8(frameReportID) {
+        let stripped = Array(buffer.dropFirst())
+        if valid(stripped) { return stripped }
+    }
+    return nil
+}
+
+let leaseMode = CommandLine.arguments.contains("--lease")
+let leaseTimeoutS: UInt8 = 30
+let leaseRenewInterval: TimeInterval = 10 // < timeoutS / 2
+
+var deviceIndex: [IOHIDDevice: Int] = [:]
+var nextDeviceIndex = 0
+var leasedDevices: Set<IOHIDDevice> = []
+
+func stringProperty(_ device: IOHIDDevice, _ key: String) -> String {
+    (IOHIDDeviceGetProperty(device, key as CFString) as? String) ?? "?"
+}
+
+func intProperty(_ device: IOHIDDevice, _ key: String) -> Int {
+    (IOHIDDeviceGetProperty(device, key as CFString) as? Int) ?? -1
+}
+
+func note(_ message: String) {
+    FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
+}
+
+func describe(_ device: IOHIDDevice, index: Int) {
+    let product = stringProperty(device, kIOHIDProductKey)
+    let transport = stringProperty(device, kIOHIDTransportKey)
+    let vid = intProperty(device, kIOHIDVendorIDKey)
+    let pid = intProperty(device, kIOHIDProductIDKey)
+    note(String(format: "# dev %d: %@ transport=%@ vid=0x%04X pid=0x%04X",
+                index, product, transport, vid, pid))
+
+    // Read the capability feature report (same report ID) for context.
+    var buffer = [UInt8](repeating: 0, count: 128)
+    var length: CFIndex = buffer.count
+    let result = IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature,
+                                      CFIndex(frameReportID), &buffer, &length)
+    if result == kIOReturnSuccess, length > 0, length <= buffer.count,
+       let body = featureBody(Array(buffer[0 ..< length])) {
+        // The device id is the same eight bytes over USB and BLE, so it
+        // is how a capture from one transport is matched to the other.
+        // It identifies the keyboard: redact it before sharing a capture.
+        let deviceID = body[featureDeviceIDOffset ..< featureDeviceIDOffset + featureDeviceIDLength]
+            .map { String(format: "%02X", $0) }.joined()
+        note(String(format: "# dev %d: feature report: %d bytes, protocol_version=%d pads_present=0x%02X capabilities=0x%02X module_version=0x%02X magic=%@ device_id=%@",
+                    index, body.count, body[0], body[1], body[2], body[3],
+                    String(decoding: body[featureMagicOffset ..< featureMagicOffset + featureMagic.count], as: UTF8.self),
+                    deviceID))
+    } else if result == kIOReturnSuccess {
+        note(String(format: "# dev %d: feature report is not protocol %d (%d bytes)",
+                    index, Int(featureProtocolVersion), Int(length)))
+    } else {
+        note(String(format: "# dev %d: feature report read failed (0x%X)", index, result))
+    }
+}
+
+// --- lease mode (--lease) ---------------------------------------------------
+// Validation and framing both handle the macOS quirk: over USB,
+// feature-report GETs arrive with the report-ID byte prefixed (and some
+// stacks want SETs prefixed too); over BLE both are bare. Lease writes go
+// bare-body first, then retry once with the prefix.
+
+func leaseCapable(_ device: IOHIDDevice) -> Bool {
+    var buffer = [UInt8](repeating: 0, count: 128)
+    var length: CFIndex = buffer.count
+    guard IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, CFIndex(frameReportID),
+                               &buffer, &length) == kIOReturnSuccess,
+          length > 0, length <= buffer.count,
+          let body = featureBody(Array(buffer[0..<length])) else { return false }
+    return body[2] & 0x01 != 0 // protocol 4 (checked above) + lease capability
+}
+
+@discardableResult
+func writeLease(_ device: IOHIDDevice, hold: Bool) -> Bool {
+    let body: [UInt8] = [0x01, hold ? 0x01 : 0x00, leaseTimeoutS, 0x00]
+    for payload in [body, [UInt8(frameReportID)] + body] {
+        let result = payload.withUnsafeBufferPointer {
+            IOHIDDeviceSetReport(device, kIOHIDReportTypeFeature, CFIndex(frameReportID),
+                                 $0.baseAddress!, payload.count)
+        }
+        if result == kIOReturnSuccess { return true }
+    }
+    return false
+}
+
+setvbuf(stdout, nil, _IOLBF, 0) // line-buffer CSV so captures survive Ctrl-C
+
+let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+let matching: [String: Any] = [
+    kIOHIDDeviceUsagePageKey: usagePage,
+    kIOHIDDeviceUsageKey: usage
+]
+IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+
+IOHIDManagerRegisterDeviceMatchingCallback(manager, { _, _, _, device in
+    let index = nextDeviceIndex
+    nextDeviceIndex += 1
+    deviceIndex[device] = index
+    describe(device, index: index)
+    if leaseMode {
+        if leaseCapable(device) {
+            if writeLease(device, hold: true) {
+                leasedDevices.insert(device)
+                note("# dev \(index): lease acquired (timeout \(leaseTimeoutS)s); keyboard's own wheel scrolling suppressed")
+            } else {
+                note("# dev \(index): LEASE WRITE FAILED on both framings")
+            }
+        } else {
+            note("# dev \(index): not lease-capable (no protocol-4 feature report or capability bit 0 clear)")
+        }
+    }
+}, nil)
+
+IOHIDManagerRegisterDeviceRemovalCallback(manager, { _, _, _, device in
+    leasedDevices.remove(device)
+    if let index = deviceIndex.removeValue(forKey: device) {
+        note("# dev \(index): removed")
+    }
+}, nil)
+
+IOHIDManagerRegisterInputReportCallback(manager, { _, _, sender, _, reportID, report, reportLength in
+    let hostNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+    guard reportID == frameReportID, reportLength >= framePayloadLength else { return }
+    // USB delivers the buffer with the report ID prepended; BLE does not.
+    // One byte longer than the contract means a report-ID prefix.
+    let offset = reportLength == framePayloadLength + 1 ? 1 : 0
+    let b = UnsafeBufferPointer(start: report + offset, count: reportLength - offset)
+    var dev = -1
+    if let sender = sender {
+        let device = Unmanaged<IOHIDDevice>.fromOpaque(sender).takeUnretainedValue()
+        dev = deviceIndex[device] ?? -1
+    }
+    let x = Int(b[2]) | (Int(b[3]) << 8)
+    let y = Int(b[4]) | (Int(b[5]) << 8)
+    let ts = Int(b[9]) | (Int(b[10]) << 8)
+    print("\(hostNs),\(dev),\(b[0]),\(b[1]),\(x),\(y),\(b[6]),\(b[7]),\(b[8]),\(ts)")
+}, nil)
+
+IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.commonModes.rawValue)
+let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+if openResult != kIOReturnSuccess {
+    note(String(format: "# IOHIDManagerOpen returned 0x%X; waiting for a matching device anyway", openResult))
+}
+
+print("host_ns,dev,pad,contact,x,y,z,flags,seq,ts_ticks")
+if leaseMode {
+    note("# lease mode: this monitor holds the lease - do NOT run RawTouch at the same time")
+    Timer.scheduledTimer(withTimeInterval: leaseRenewInterval, repeats: true) { _ in
+        for device in leasedDevices {
+            writeLease(device, hold: true)
+        }
+    }
+}
+note("# monitoring (Ctrl-C to stop)...")
+
+// DispatchSource rather than signal(): releasing the lease does I/O, which
+// is not async-signal-safe. The main run loop services the main queue.
+signal(SIGINT, SIG_IGN)
+let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+sigintSource.setEventHandler {
+    for device in leasedDevices {
+        writeLease(device, hold: false)
+    }
+    if !leasedDevices.isEmpty {
+        note("# lease(s) released")
+    }
+    note("# stopped")
+    exit(0)
+}
+sigintSource.resume()
+
+CFRunLoopRun()

@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "scale": 1.0,
+  "reverseScrolling": false,
+  "acceleration": {
+    "enabled": true,
+    "exponent": 0.9,
+    "referenceFingerSpeed": 40,
+    "minGain": 1.0,
+    "maxGain": 16.0
+  },
+  "momentum": {
+    "decayTimeConstant": 0.55,
+    "minimumFlickSpeed": 23,
+    "maximumCoastSpeed": 4600,
+    "liftStrengthFloor": 0.6
+  },
+  "resampling": {
+    "enabled": true
+  },
+  "updates": {
+    "checkAutomatically": true
+  },
+  "devices": {}
+}

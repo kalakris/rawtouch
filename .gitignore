@@ -1,0 +1,18 @@
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+.DS_Store
+__pycache__/
+*.pyc
+
+# Live recordings: raw captures name the keyboard's hardware id
+bench/recordings-*/
+*.app
+*.xcworkspace
+*.dSYM/
+
+# Internal design notes, kept locally
+DESIGN.md
+PRODUCT.md
+.impeccable/

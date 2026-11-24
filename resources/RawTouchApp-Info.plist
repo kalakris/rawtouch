@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>RawTouch</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.kalakris.RawTouch</string>
+	<key>CFBundleIconFile</key>
+	<string>RawTouch</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RawTouch</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<!-- Placeholders. scripts/make-app.sh stamps the real version (the v*
+	     tag, or 0.0.0-dev), the build number (the commit count) and
+	     RawTouchGitCommit (the short commit hash) as it assembles the
+	     bundle, so nothing here is bumped by hand. -->
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 RawTouch contributors. MIT License.</string>
+</dict>
+</plist>

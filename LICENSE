@@ -1,0 +1,46 @@
+MIT License
+
+Copyright (c) 2026 RawTouch contributors
+
+Portions of this software are derived from LinearMouse
+(https://github.com/linearmouse/linearmouse) — Copyright (c) 2021-2026
+LinearMouse — and are used under the MIT License. Files carrying a
+"Derived from LinearMouse" header retain that copyright notice in
+addition to the one above. The derived files are:
+
+  Sources/RawTouchCore/EventThread.swift
+  Sources/RawTouchCore/GestureEvent.swift
+  Sources/RawTouchCore/GestureScrollSeriesPoster.swift
+  Sources/RawTouchCore/ModifierFlags.swift
+  Sources/RawTouchCore/RawTouchCapabilities.swift
+  Sources/RawTouchCore/RawTouchConfiguration.swift
+  Sources/RawTouchCore/RawTouchDeviceClock.swift
+  Sources/RawTouchCore/RawTouchDeviceManager.swift
+  Sources/RawTouchCore/RawTouchFrame.swift
+  Sources/RawTouchCore/RawTouchScrollPoster.swift
+  Sources/RawTouchCore/ScrollWheelEventView.swift
+  Sources/RawTouchCore/SystemScrollingPreference.swift
+  Sources/RawTouchCore/TouchScrollEngine.swift
+  Sources/RawTouchCore/TouchScrollPipeline.swift
+  Sources/RawTouchTestSupport/RawTouchFrameFixtures.swift
+  Tests/RawTouchCoreTests/RawTouchCapabilitiesTests.swift
+  Tests/RawTouchCoreTests/RawTouchScrollPosterTests.swift
+  Tests/RawTouchCoreTests/TouchScrollEngineTests.swift
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

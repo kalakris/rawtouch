@@ -1,0 +1,148 @@
+# Builds, signs, notarizes and publishes RawTouch when a release tag is pushed.
+#
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# The tag is the version: the app is stamped with the tag minus its `v`, and
+# with the commit count at that tag as the build number. The release notes are
+# docs/release-notes/<tag>.md, written before tagging. A tag with a
+# pre-release suffix (v1.3.0-rc.1) is published as a pre-release, which the
+# app's update check never offers.
+#
+# Only tags matching v[0-9]* trigger this; ordinary pushes never do. A cheap
+# first job refuses a tag that is not vMAJOR.MINOR.PATCH[-PRERELEASE] (a
+# `v0.1` would otherwise publish as the latest release, and every installed
+# app's update check would fail to read it) or has no release notes, before
+# anything else runs. The release job then waits for the CI workflow's
+# build, tests and bench. The signing
+# certificate and notarization key live in the "release" environment's
+# secrets, so pull requests and forks can never reach them:
+#   MACOS_CERTIFICATE_P12       base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's export password
+#   ASC_API_KEY_P8              contents of the App Store Connect API key (.p8)
+#   ASC_API_KEY_ID              its Key ID
+#   ASC_API_ISSUER_ID           the Issuer ID
+#
+# Two artifacts land on the release: a DMG (the download for people) and a
+# zip (for Homebrew and scripted installs). Both carry a build-provenance
+# attestation (SLSA, signed by GitHub's Sigstore instance) once the repo is
+# public; anyone can then verify a file came from this workflow at the
+# tagged commit:
+#   gh attestation verify RawTouch-v1.2.3.dmg --owner kalakris
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+# Per job: only the release job writes anything.
+permissions: {}
+
+jobs:
+  # Seconds on Linux, so a malformed tag or missing notes fail before a
+  # macOS runner is spent on them.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Tag is a release version
+        run: |
+          re='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $re ]]; then
+            echo "::error::$GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE"
+            exit 1
+          fi
+
+      - name: Release notes exist
+        run: |
+          notes="docs/release-notes/$GITHUB_REF_NAME.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::Write $notes before tagging $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+  # The same build, tests and bench as every push to main. A tag cannot
+  # ship from a tree that fails them.
+  test:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    needs: [preflight, test]
+    # The same image and Xcode as the CI job (ci.yml), so the published
+    # binary is built by the toolchain the tests ran on.
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    environment: release
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign the attestation
+      attestations: write  # store the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build number is the commit count at the tag, which a
+          # shallow clone cannot count.
+          fetch-depth: 0
+
+      - name: Import the Developer ID certificate into a throwaway keychain
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build and sign
+        run: RAWTOUCH_VERSION="${GITHUB_REF_NAME#v}" ./scripts/make-app.sh "$RUNNER_TEMP/dist/RawTouch.app"
+
+      - name: Notarize and staple
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: ./scripts/notarize.sh "$RUNNER_TEMP/dist/RawTouch.app" "$RUNNER_TEMP/dist/RawTouch-$GITHUB_REF_NAME.zip"
+
+      # GitHub stores attestations for public repositories only (a private
+      # user-owned repo fails with "Feature not available"), so this step is
+      # skipped until the repository is public.
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/RawTouch-${{ github.ref_name }}.zip
+            ${{ runner.temp }}/dist/RawTouch-${{ github.ref_name }}.dmg
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          prerelease=
+          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" $prerelease \
+            "$RUNNER_TEMP/dist/RawTouch-$GITHUB_REF_NAME.dmg" \
+            "$RUNNER_TEMP/dist/RawTouch-$GITHUB_REF_NAME.zip" \
+            --title "RawTouch $GITHUB_REF_NAME" --notes-file "docs/release-notes/$GITHUB_REF_NAME.md" --verify-tag
+
+      - name: Remove the throwaway keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true

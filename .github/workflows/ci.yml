@@ -1,0 +1,82 @@
+# Builds, tests and benches RawTouch on every push to main and every pull
+# request. The Release workflow calls this too (workflow_call), so a tag
+# never ships from a tree that fails here.
+#
+# Nothing here needs a secret. make-app.sh finds no signing identity on the
+# runner and falls back to ad-hoc signing, which still exercises the
+# universal release build, the bundle assembly and the plist handling that
+# a release depends on. The unit tests and the offline bench drive the
+# pipeline with injected clocks and event sinks: no keyboard, no posting,
+# no Accessibility prompt.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # GitHub's macOS 27 image, with one Xcode selected for every step: the
+    # release is built by this job's toolchain, so it is the one to develop
+    # and test against, and swift-format ships with Xcode and its output
+    # can change between releases. When the image drops this Xcode, bump it
+    # together with a reformat (CONTRIBUTING.md, Style).
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    # A newer push to the same branch supersedes a run still in progress.
+    # macOS minutes are the expensive kind while the repo is private.
+    concurrency:
+      group: ci-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Formatting
+        run: |
+          swift format --version
+          swift format lint --strict --parallel --recursive Package.swift Sources Tests
+
+      # Debug build of every target, the bench included, which the tests
+      # alone would not compile.
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      # The deterministic cadence bench: 100 Hz frames through the real
+      # pipeline against a simulated 120 Hz display. Exits non-zero if any
+      # ON run posts a retraction, a dead zone on resume, or a horizontal
+      # delta. Reuses the debug build above.
+      - name: Offline scroll bench
+        run: swift run scroll-bench --offline
+
+      # The exact script a release runs, minus the certificate.
+      - name: Assemble the app bundle
+        run: ./scripts/make-app.sh "$RUNNER_TEMP/RawTouch.app"
+
+      # The README promises RawTouch creates no event taps and reads no
+      # keystrokes. NoEventTapsTests checks the sources; this checks the
+      # binary that would ship.
+      - name: Binary names no event-tap API
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/RawTouch.app"
+          codesign --verify --verbose=2 "$APP"
+          if nm -u "$APP/Contents/MacOS/RawTouch" | grep -E 'CGEventTap|CGEventCreateKeyboardEvent'; then
+            echo "::error::the binary references an event-tap or keyboard-event API"
+            exit 1
+          fi
+          echo "no event-tap symbols"
